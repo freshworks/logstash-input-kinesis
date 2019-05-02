@@ -1,4 +1,11 @@
 # encoding: utf-8
+require 'java'
+
+java_import java.io.ByteArrayInputStream
+java_import java.io.ByteArrayOutputStream
+java_import java.util.zip.GZIPInputStream
+java_import java.util.zip.ZipException
+
 class LogStash::Inputs::Kinesis::Worker
   include com.amazonaws.services.kinesis.clientlibrary.interfaces.v2::IRecordProcessor
 
@@ -45,7 +52,23 @@ class LogStash::Inputs::Kinesis::Worker
   end
 
   def process_record(record)
-    raw = String.from_java_bytes(record.getData.array)
+    data = record.getData.array
+    # Decompress here
+    gzip_header = (data[0] & 0xff) | ((data[1] << 8) & 0xff00)
+
+    if gzip_header == 0x8b1f
+      byte_stream = ByteArrayInputStream.new(data)
+      gzip_stream = GZIPInputStream.new(byte_stream)
+      out_stream = ByteArrayOutputStream.new
+      buf = Java::byte[1024].new
+      while ((len = gzip_stream.read(buf)) > 0)
+        out_stream.write(buf, 0, len)
+      end
+      raw = String.from_java_bytes(out_stream.toByteArray)
+    else
+      raw = String.from_java_bytes(data)
+    end
+
     metadata = build_metadata(record)
     @codec.decode(raw) do |event|
       @decorator.call(event)
@@ -54,6 +77,10 @@ class LogStash::Inputs::Kinesis::Worker
     end
   rescue => error
     @logger.error("Error processing record: #{error}")
+  ensure
+    out_stream.close unless out_stream.nil?
+    gzip_stream.close unless gzip_stream.nil?
+    byte_stream.close unless byte_stream.nil?
   end
 
   def build_metadata(record)
