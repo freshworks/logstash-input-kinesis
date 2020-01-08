@@ -5,6 +5,7 @@ java_import java.io.ByteArrayInputStream
 java_import java.io.ByteArrayOutputStream
 java_import java.util.zip.GZIPInputStream
 java_import java.util.zip.ZipException
+java_import java.nio.ByteBuffer
 
 class LogStash::Inputs::Kinesis::Worker
   include com.amazonaws.services.kinesis.clientlibrary.interfaces.v2::IRecordProcessor
@@ -65,11 +66,34 @@ class LogStash::Inputs::Kinesis::Worker
         out_stream.write(buf, 0, len)
       end
       raw = String.from_java_bytes(out_stream.toByteArray)
+      java_payload = out_stream.toByteArray
     else
       raw = String.from_java_bytes(data)
+      java_payload = data
+    end
+
+    # Extract headers here
+    byte_buffer = ByteBuffer.wrap(java_payload)
+    headers = Hash.new
+    magic_num = byte_buffer.get & 0xff
+    if magic_num == 0xff
+      header_count = byte_buffer.get & 0xff
+      for i in 1..header_count do
+        len = byte_buffer.get & 0xff
+        header_name = String.from_java_bytes(java.util::Arrays.copyOfRange(java_payload, byte_buffer.position, byte_buffer.position + len))
+        byte_buffer.position(byte_buffer.position + len)
+        len = byte_buffer.getInt
+        header_content = String.from_java_bytes(java.util::Arrays.copyOfRange(java_payload, byte_buffer.position, byte_buffer.position + len))
+        headers[header_name] = header_content
+        byte_buffer.position(byte_buffer.position + len)
+      end
+      raw = String.from_java_bytes(java.util::Arrays.copyOfRange(java_payload, byte_buffer.position, byte_buffer.position + byte_buffer.remaining))
+    else
+      raw = String.from_java_bytes(java_payload)
     end
 
     metadata = build_metadata(record)
+    metadata['headers'] = headers
     @codec.decode(raw) do |event|
       @decorator.call(event)
       event.set('@metadata', metadata)
